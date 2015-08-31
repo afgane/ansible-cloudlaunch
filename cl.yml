@@ -1,0 +1,85 @@
+---
+- hosts: cloudlaunch
+  sudo: yes
+  vars:
+    cl_db_password: <provide password here>
+    cl_secret_key: '<provide a secret key of choice here>'
+
+  tasks:
+    - name: Update APT cache
+      apt: update_cache=yes
+
+    - name: Install required system packages
+      apt: pkg={{ item }} state=latest
+      with_items:
+        - python-virtualenv
+        - git
+        - postgresql
+        - libpq-dev
+        - postgresql-server-dev-all
+        - python-dev
+        - nginx
+        - supervisor
+
+    - name: Install required Python packages
+      pip: name=psycopg2
+
+    - name: Add launch user
+      user: name=launch shell=/bin/bash
+
+    - name: Create work dir
+      file: path=/srv/cloudlaunch state=directory owner=launch
+
+    - name: Clone Cloud Launch repo
+      sudo_user: launch
+      git: dest=/srv/cloudlaunch/cloudlaunch repo=https://github.com/galaxyproject/cloudlaunch.git
+
+    - name: Install Cloud Launch dependencies
+      sudo_user: launch
+      pip: requirements=/srv/cloudlaunch/cloudlaunch/requirements.txt virtualenv=/srv/cloudlaunch/.cl
+
+    - name: Create database user
+      sudo_user: postgres
+      postgresql_user: name=launch password="{{ cl_db_password }}" role_attr_flags=LOGIN  #"
+
+    - name: Create a database
+      sudo_user: postgres
+      postgresql_db: name=cloudlaunch owner=launch
+
+    - name: Place Django settings file
+      template: src=templates/settings.j2 dest=/srv/cloudlaunch/cloudlaunch/biocloudcentral/settings_local.py owner=launch
+
+    - name: Collect Django static files
+      django_manage: virtualenv=/srv/cloudlaunch/.cl app_path=/srv/cloudlaunch/cloudlaunch/biocloudcentral command=collectstatic
+
+    - name: Perform database migrations
+      django_manage: virtualenv=/srv/cloudlaunch/.cl app_path=/srv/cloudlaunch/cloudlaunch/biocloudcentral command="{{ item }}"
+      with_items:
+        - syncdb
+        - "migrate biocloudcentral"
+        - "migrate djcelery"
+        - "migrate kombu.transport.django"  #"
+
+    - name: Remove nginx default config
+      file: path=/etc/nginx/sites-enabled/default state=absent
+
+    - name: Place a custom nginx config
+      command: cp /srv/cloudlaunch/cloudlaunch/cl_nginx.conf /etc/nginx/sites-available/
+
+    - name: Symlink the nginx config file
+      file: src=/etc/nginx/sites-available/cl_nginx.conf dest=/etc/nginx/sites-enabled/cl state=link
+
+    - name: Start and reload nginx
+      command: "{{ item }}"
+      with_items:
+        - service nginx start
+        - nginx -s reload
+
+    - name: Place supervisor file
+      command: cp /srv/cloudlaunch/cloudlaunch/cl_supervisor.conf /etc/supervisor/conf.d/
+
+    - name: Engage supervisor
+      command: supervisorctl  "{{ item }}"  #"
+      with_items:
+        - reread
+        - update
